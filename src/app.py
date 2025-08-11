@@ -4,7 +4,8 @@ import datetime
 from dotenv import load_dotenv
 from twitchio.ext import commands
 from textblob import TextBlob
-
+import threading
+import openai
 
 load_dotenv()
 
@@ -42,9 +43,47 @@ class Bot(commands.Bot):
             "content": message.content
         })        
 
-        print(f"{message.author.name}: {message.content} (Sentiment: {polarity:.2f})")
+        print(f"{message.author.name}: {message.content} (Sentiment: {polarity:.2f}) \n \n")
         await self.handle_commands(message)
+    async def analyze_chat(self):
+        if not chat_log:
+            print("No chat messages to analyze.")
+            return
+
+        conversation_text = "\n".join(
+            f"{msg['user']}: {msg['content']}" for msg in chat_log
+        )
+
+        print("\n--- Sending chat to OpenAI for analysis ---")
+        try:
+            response = openai.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": "You are an AI assistant summarizing Twitch chat."},
+                    {"role": "user", "content": f"Analyze the following chat messages:\n{conversation_text}"}
+                ],
+                max_tokens=150
+            )
+            analysis = response.choices[0].message.content
+            print(f"--- Analysis ---\n{analysis}\n")
+        except Exception as e:
+            print(f"OpenAI API error: {e}")
+
+        chat_log.clear()
+
+# Function to listen for terminal input without blocking asyncio loop
+def terminal_listener(bot: Bot):
+    while True:
+        cmd = input()
+        if cmd.strip().lower() == "analyze":
+            # Schedule the analyze_chat coroutine in the bot's event loop
+            asyncio.run_coroutine_threadsafe(bot.analyze_chat(), bot.loop)
 
 if __name__ == "__main__":
     bot = Bot()
+
+    # Start terminal listener in a separate thread
+    listener_thread = threading.Thread(target=terminal_listener, args=(bot,), daemon=True)
+    listener_thread.start()
+
     bot.run()

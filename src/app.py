@@ -1,74 +1,65 @@
 import os
-import threading
-import time
-from collections import deque
 import asyncio
 from twitchio.ext import commands
-import openai  # make sure to `pip install openai twitchio`
 from dotenv import load_dotenv
 
-load_dotenv() 
-# Load keys from environment variables or .env
-TWITCH_TOKEN = os.getenv('TWITCH_TOKEN')  # OAuth token with chat:read
-TWITCH_NICK = os.getenv('TWITCH_NICK')    # your bot's Twitch username
-TWITCH_CHANNEL = os.getenv('TWITCH_CHANNEL')  # channel to join
-OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
+load_dotenv()
 
-openai.api_key = OPENAI_API_KEY
+ANALYSIS_FILE = "conversation_analysis.txt"
+TWITCH_TOKEN = os.getenv("TWITCH_TOKEN")
+TWITCH_NICK = os.getenv("BOT_NICK")  # Your bot's username
+TWITCH_CHANNEL = os.getenv("TWITCH_CHANNEL")  # Channel to join
 
-MAX_MESSAGES = 100
-chat_messages = deque(maxlen=MAX_MESSAGES)
+
+async def query_ollama_async(prompt):
+    process = await asyncio.create_subprocess_exec(
+        "ollama", "run", "llama2", prompt,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE
+    )
+    stdout, stderr = await process.communicate()
+    if process.returncode != 0:
+        print(f"Ollama error: {stderr.decode()}")
+        return ""
+    return stdout.decode().strip()
+
 
 class Bot(commands.Bot):
-
     def __init__(self):
-        super().__init__(token=TWITCH_TOKEN,
-                         nick=TWITCH_NICK,
-                         prefix='!',
-                         initial_channels=[TWITCH_CHANNEL])
+        super().__init__(token=TWITCH_TOKEN, prefix="!", initial_channels=[TWITCH_CHANNEL])
+        self.chat_log = []
+        self.analysis_task = None
 
     async def event_ready(self):
-        print(f'Logged in as | {self.nick}')
+        print(f"Logged in as {self.nick}")
 
     async def event_message(self, message):
-        if message.echo:
+        if message.author.name.lower() == TWITCH_NICK.lower():
             return
-        print(f'[{message.author.name}]: {message.content}')
-        chat_messages.append(message.content)
-        await self.handle_commands(message)
-client = OpenAI()
 
-def openai_worker():
-    while True:
-        time.sleep(30)  # every 30 seconds
-        if chat_messages:
-            batch = list(chat_messages)
-            print(f'Analyzing {len(batch)} messages...')
-            prompt = "Analyze these Twitch chat messages:\n" + "\n".join(batch)
-            try:
-                response = client.chat.completions.create(
-                    model="gpt-3.5-turbo",
-                    messages=[
-                        {"role": "system", "content": "You are a helpful assistant analyzing Twitch chat."},
-                        {"role": "user", "content": prompt}
-                    ],
-                    max_tokens=150
-                )
-                analysis = response.choices[0].message.content.strip()
-                print("OpenAI analysis saved to analysis.txt")
-                with open("analysis.txt", "w", encoding="utf-8") as f:
-                    f.write(f"OpenAI analysis of last {len(batch)} messages:\n\n")
-                    f.write(analysis)
-                    f.write("\n")
-            except Exception as e:
-                print("OpenAI API error:", e)
+        print(f"{message.author.name}: {message.content}")
+        self.chat_log.append(f"{message.author.name}: {message.content}")
+
+        if len(self.chat_log) % 5 == 0:
+            if self.analysis_task and not self.analysis_task.done():
+                self.analysis_task.cancel()
+
+            prompt = (
+                "Analyze the following Twitch chat conversation so far and "
+                "summarize the main themes and tone:\n\n"
+                + "\n".join(self.chat_log)
+            )
+            self.analysis_task = asyncio.create_task(self.do_analysis(prompt))
+
+        await self.handle_commands(message)
+
+    async def do_analysis(self, prompt):
+        analysis = await query_ollama_async(prompt)
+        with open(ANALYSIS_FILE, "w", encoding="utf-8") as f:
+            f.write(analysis)
+        print("\n=== Updated chat analysis saved ===\n")
+
 
 if __name__ == "__main__":
     bot = Bot()
-
-    # Start OpenAI worker in separate thread
-    t = threading.Thread(target=openai_worker, daemon=True)
-    t.start()
-
-    # Run Twitch bot (asyncio event loop)
     bot.run()

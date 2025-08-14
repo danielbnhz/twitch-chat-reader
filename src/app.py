@@ -26,11 +26,15 @@ def llama_worker(input_q, output_q):
         if batch == "STOP":
             break
 
-        prompt = "\n".join(batch)
-        print(f"[LLaMA Worker] Processing batch: {prompt}")
+        prompt = (
+            "You are a Twitch chat analyzer. Summarize the following messages, "
+            "including main topics and overall tone. Respond only with a concise analysis:\n\n"
+        )
+        prompt += "\n".join(batch)
+        #print(f"[LLaMA Worker] Processing batch: {prompt}")
         
         response = llm(prompt, max_tokens=100)
-        output_q.put(response["choices"][0]["text"].strip())
+        print(response["choices"][0]["text"].strip())
 
 
 # ------------------------------------------
@@ -72,8 +76,8 @@ class Bot(commands.Bot):
     async def check_llama_responses(self):
         while not self.out_q.empty():
             response = self.out_q.get()
-            await self.connected_channels[0].send(f"LLaMA: {response}")
-
+            #await self.connected_channels[0].send(f"LLaMA: {response}")
+            print(f"LLaMA would respond: {response}")
 
 # ------------------------------------------
 # Main Entry

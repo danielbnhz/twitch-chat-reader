@@ -1,7 +1,10 @@
+import subprocess
 from twitchio.ext import commands
 from llama_cpp import Llama
 import os
 import time
+import socket
+import json
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from dotenv import load_dotenv
@@ -25,6 +28,32 @@ executor = ThreadPoolExecutor(max_workers=1)
 
 
 MAX_PROMPT_TOKENS = 900  # leave some room for LLM output
+
+def wait_for_gui(host="127.0.0.1", port=4000, timeout=10):
+    start = time.time()
+    while True:
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(0.5)
+            s.connect((host, port))
+            s.close()
+            break  # GUI is ready
+        except (ConnectionRefusedError, socket.timeout):
+            if time.time() - start > timeout:
+                raise TimeoutError("Rust GUI did not start in time")
+            time.sleep(0.1)
+
+
+def send_to_gui(message: str):
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.connect(("127.0.0.1", 4000))
+        payload = json.dumps({"message": message})
+        s.sendall(payload.encode())
+        s.close()
+    except ConnectionRefusedError:
+        print("Warning: Rust GUI not running yet.")
+
 
 def truncate_prompt(prompt, max_tokens=MAX_PROMPT_TOKENS):
     tokens = llm.tokenize(prompt.encode("utf-8"))
@@ -56,8 +85,10 @@ class Bot(commands.Bot):
     async def event_message(self, message):
         if message.echo:
             return
-        # Add message to buffer
-        self.chat_buffer.append(f"{message.author.name}: {message.content}")
+        msg_text = f"{message.author.name}: {message.content}"
+        self.chat_buffer.append(msg_text)
+        send_to_gui(msg_text)  # send live update to Rust GUI
+
 
     async def process_stats_periodically(self):
         """Every batch_interval seconds, run C++ stats + AI summary silently."""
@@ -89,5 +120,14 @@ class Bot(commands.Bot):
 
 
 if __name__ == "__main__":
+        # Path to the Rust GUI binary
+    gui_path = os.path.join(os.path.dirname(__file__), "../rust_gui/target/release/rust_gui.exe")
+
+    # Launch the Rust GUI as a subprocess
+    subprocess.Popen([gui_path])
+
+    # Wait for the GUI to be ready
+    wait_for_gui()  # make sure you have this function defined earlier
+
     bot = Bot()
     bot.run()

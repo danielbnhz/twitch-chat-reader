@@ -1,59 +1,113 @@
-use eframe::egui;
-use serde_json::Value;
-use tokio::net::TcpListener;
-use tokio::io::AsyncReadExt;
-use tokio::sync::mpsc::{self, UnboundedSender};
+use eframe::{egui, App};
+use std::io::{BufRead, BufReader};
+use std::net::{TcpListener, TcpStream};
+use std::sync::{Arc, Mutex};
+use std::thread;
 
-#[tokio::main]
-async fn main() -> eframe::Result<()> {
-    // Channel to send messages from TCP listener to GUI
-    let (tx, rx) = mpsc::unbounded_channel::<String>();
-
-    // Spawn TCP listener for Python
-    tokio::spawn(async move {
-        let listener = TcpListener::bind("127.0.0.1:4000").await.unwrap();
-        println!("Listening for Python messages on 127.0.0.1:4000");
-        loop {
-            let (mut socket, _) = listener.accept().await.unwrap();
-            let tx_clone: UnboundedSender<String> = tx.clone();
-            tokio::spawn(async move {
-                let mut buf = vec![0; 1024];
-                let n = socket.read(&mut buf).await.unwrap();
-                if n == 0 { return; }
-                if let Ok(msg_json) = serde_json::from_slice::<Value>(&buf[..n]) {
-                    if let Some(text) = msg_json.get("message").and_then(|v| v.as_str()) {
-                        let _ = tx_clone.send(text.to_string());
-                    }
-                }
-            });
-        }
-    });
-
-    // Start GUI
-    let app = MyApp { messages: Vec::new(), rx };
-    let options = eframe::NativeOptions::default();
-    eframe::run_native("Twitch Bot GUI", options, Box::new(|_cc| Box::new(app)))
+#[derive(Default)]
+struct GuiState {
+    chat_log: String,
+    stats: String,
+    llm_output: String,
 }
 
 struct MyApp {
-    messages: Vec<String>,
-    rx: tokio::sync::mpsc::UnboundedReceiver<String>,
+    state: Arc<Mutex<GuiState>>,
 }
 
-impl eframe::App for MyApp {
+impl App for MyApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Drain all messages received from Python
-        while let Ok(msg) = self.rx.try_recv() {
-            self.messages.push(msg);
-        }
+        let state = self.state.lock().unwrap();
 
-        egui::CentralPanel::default().show(ctx, |ui| {
-            ui.heading("Twitch Bot GUI");
-            for msg in &self.messages {
-                ui.label(msg);
-            }
+        // Top heading
+        egui::TopBottomPanel::top("top_panel").show(ctx, |ui| {
+            ui.heading("📊 Twitch Bot Dashboard");
         });
 
-        ctx.request_repaint(); // continuously update
+        // Central panel with 3 vertical sections
+        egui::CentralPanel::default().show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                // Left: Twitch Chat
+                ui.vertical(|ui| {
+                    ui.group(|ui| {
+                        ui.label("💬 Twitch Chat");
+                        egui::ScrollArea::vertical().show(ui, |ui| {
+                            ui.label(&state.chat_log);
+                        });
+                    });
+                });
+
+                // Middle: Stats
+                ui.vertical(|ui| {
+                    ui.group(|ui| {
+                        ui.label("📊 Stats");
+                        egui::ScrollArea::vertical().show(ui, |ui| {
+                            ui.label(&state.stats);
+                        });
+                    });
+                });
+
+                // Right: LLM Output
+                ui.vertical(|ui| {
+                    ui.group(|ui| {
+                        ui.label("🤖 LLM Output");
+                        egui::ScrollArea::vertical().show(ui, |ui| {
+                            ui.label(&state.llm_output);
+                        });
+                    });
+                });
+            });
+        });
+
+        // Request repaint so updates appear immediately
+        ctx.request_repaint();
     }
+}
+
+fn main() -> eframe::Result<()> {
+    let state = Arc::new(Mutex::new(GuiState::default()));
+    let state_clone = state.clone();
+
+    // TCP listener thread
+    thread::spawn(move || {
+        let listener = TcpListener::bind("127.0.0.1:7879")
+            .expect("Failed to bind to port 7879");
+        println!("Waiting for Rust GUI to connect on 127.0.0.1:7879...");
+
+        for stream in listener.incoming() {
+            if let Ok(stream) = stream {
+                let state_clone = state_clone.clone();
+                thread::spawn(move || handle_client(stream, &state_clone));
+            }
+        }
+    });
+
+    // Default options
+    let options = eframe::NativeOptions::default();
+
+    // Run the GUI
+    eframe::run_native(
+        "Twitch Bot Dashboard",
+        options,
+        Box::new(|_cc| Box::new(MyApp { state })),
+    )
+}
+
+fn handle_client(stream: TcpStream, state: &Arc<Mutex<GuiState>>) {
+    println!("Rust GUI connected from {:?}", stream.peer_addr());
+    let reader = BufReader::new(stream);
+    for line in reader.lines() {
+        if let Ok(msg) = line {
+            let mut state = state.lock().unwrap();
+            if msg.starts_with("CHAT:") {
+                state.chat_log.push_str(&msg[5..]);
+                state.chat_log.push('\n');
+            } else if msg.starts_with("STATS:") {
+                state.stats = msg[6..].to_string();
+            } else if msg.starts_with("LLM:") {
+                state.llm_output = msg[4..].to_string();
+            }
+        }
+    }
+    println!("Rust GUI client disconnected");
 }

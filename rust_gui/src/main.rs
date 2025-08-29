@@ -4,9 +4,11 @@ use std::net::{TcpListener, TcpStream};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
+const CHAT_LOG_MAX_LINES: usize = 100;
+
 #[derive(Default)]
 struct GuiState {
-    chat_log: String,
+    chat_log: Vec<String>,
     stats: String,
     llm_output: String,
 }
@@ -32,7 +34,9 @@ impl App for MyApp {
                     ui.group(|ui| {
                         ui.label("💬 Twitch Chat");
                         egui::ScrollArea::vertical().show(ui, |ui| {
-                            ui.label(&state.chat_log);
+                            for msg in &state.chat_log {
+                                ui.label(msg);
+                            }
                         });
                     });
                 });
@@ -59,9 +63,36 @@ impl App for MyApp {
             });
         });
 
-        // Request repaint so updates appear immediately
+        // Request repaint for live updates
         ctx.request_repaint();
     }
+}
+
+fn handle_client(stream: TcpStream, state: &Arc<Mutex<GuiState>>) {
+    println!("Rust GUI connected from {:?}", stream.peer_addr());
+    let reader = BufReader::new(stream);
+
+    for line in reader.lines() {
+        if let Ok(msg) = line {
+            let mut state = state.lock().unwrap();
+
+            if msg.starts_with("CHAT:") {
+                state.chat_log.push(msg[5..].to_string());
+
+                // Truncate chat log if it exceeds max lines
+                if state.chat_log.len() > CHAT_LOG_MAX_LINES {
+                    let excess = state.chat_log.len() - CHAT_LOG_MAX_LINES;
+                    state.chat_log.drain(0..excess);
+                }
+            } else if msg.starts_with("STATS:") {
+                state.stats = msg[6..].to_string();
+            } else if msg.starts_with("LLM:") {
+                state.llm_output = msg[4..].to_string();
+            }
+        }
+    }
+
+    println!("Rust GUI client disconnected");
 }
 
 fn main() -> eframe::Result<()> {
@@ -82,32 +113,12 @@ fn main() -> eframe::Result<()> {
         }
     });
 
-    // Default options
+    // GUI options
     let options = eframe::NativeOptions::default();
 
-    // Run the GUI
     eframe::run_native(
         "Twitch Bot Dashboard",
         options,
         Box::new(|_cc| Box::new(MyApp { state })),
     )
-}
-
-fn handle_client(stream: TcpStream, state: &Arc<Mutex<GuiState>>) {
-    println!("Rust GUI connected from {:?}", stream.peer_addr());
-    let reader = BufReader::new(stream);
-    for line in reader.lines() {
-        if let Ok(msg) = line {
-            let mut state = state.lock().unwrap();
-            if msg.starts_with("CHAT:") {
-                state.chat_log.push_str(&msg[5..]);
-                state.chat_log.push('\n');
-            } else if msg.starts_with("STATS:") {
-                state.stats = msg[6..].to_string();
-            } else if msg.starts_with("LLM:") {
-                state.llm_output = msg[4..].to_string();
-            }
-        }
-    }
-    println!("Rust GUI client disconnected");
 }

@@ -3,7 +3,6 @@ import subprocess
 import sys
 import time
 import socket
-import json
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from dotenv import load_dotenv
@@ -12,7 +11,7 @@ from twitchio.ext import commands
 # Load environment variables
 load_dotenv()
 
-sys.path.append('../build')  # Adjust to where your compiled chat_stats module is
+sys.path.append('../build')  # Adjust if your compiled chat_stats module is elsewhere
 import chat_stats
 
 # Twitch + model settings
@@ -41,25 +40,19 @@ async def analyze_with_llama(prompt):
     )
     return result["choices"][0]["text"].strip()
 
-# --- TCP server for Rust GUI ---
+# --- TCP client for Rust GUI ---
 def wait_for_gui(host="127.0.0.1", port=7879, timeout=10):
     print(f"Waiting for Rust GUI to connect on {host}:{port}...")
     start = time.time()
-    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server.bind((host, port))
-    server.listen(1)
-    server.settimeout(0.5)
-
-    gui_conn = None
     while True:
         try:
-            gui_conn, addr = server.accept()
-            print(f"Rust GUI connected from {addr}")
-            break
-        except socket.timeout:
+            gui_conn = socket.create_connection((host, port))
+            print(f"Connected to Rust GUI at {host}:{port}")
+            return gui_conn
+        except (ConnectionRefusedError, OSError):
             if time.time() - start > timeout:
                 raise TimeoutError("Rust GUI did not start in time")
-    return gui_conn
+            time.sleep(0.5)
 
 # --- Twitch Bot ---
 class Bot(commands.Bot):
@@ -97,7 +90,7 @@ class Bot(commands.Bot):
                 self.chat_buffer.clear()
                 self.last_batch_time = now
 
-                # C++ stats
+                # C++ chat stats
                 stats = chat_stats.analyze_chat(batch)
                 for user, stat in stats.items():
                     stat_msg = f"{user}: avg_words={stat.avg_words:.2f}, caps_ratio={stat.caps_ratio:.2f}"
@@ -122,7 +115,7 @@ if __name__ == "__main__":
 
     # Wait for Rust GUI connection
     try:
-        gui_conn = wait_for_gui()
+        gui_conn = wait_for_gui(timeout=15)
     except TimeoutError as e:
         print("Error:", e)
         sys.exit(1)
